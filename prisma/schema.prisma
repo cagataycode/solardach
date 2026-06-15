@@ -1,0 +1,164 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Property & analysis (no personal data until a Lead is created)
+// ---------------------------------------------------------------------------
+
+model PropertyCheck {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  // Resolved address (entered by the homeowner themselves — inbound only)
+  rawInput     String
+  street       String?
+  houseNumber  String?
+  postcode     String?
+  city         String?
+  state        String? // Bundesland
+  countryCode  String  @default("DE")
+  latitude     Float
+  longitude    Float
+
+  // Roof data with explicit fallback tier
+  // tier: SOLAR_API | OSM_FOOTPRINT | REGION_DEFAULT
+  roofDataTier      String
+  roofAreaM2        Float?
+  usableRoofAreaM2  Float?
+  roofOrientation   String? // e.g. S, SW, SE, FLAT, UNKNOWN
+  shadingFactor     Float? // 0..1, 1 = no shading
+
+  // Irradiance (PVGIS)
+  specificYieldKwhPerKwp Float
+
+  // Scoring output
+  solarFitScore       Int // 0..100
+  estimatedCapacityKw Float
+  confidenceScore     Int // 0..100
+
+  estimate SolarEstimate?
+  lead     Lead?
+}
+
+model SolarEstimate {
+  id              String        @id @default(cuid())
+  createdAt       DateTime      @default(now())
+  propertyCheckId String        @unique
+  propertyCheck   PropertyCheck @relation(fields: [propertyCheckId], references: [id])
+
+  // Inputs (snapshot of assumptions used — assumptions change over time)
+  consumptionBandKwh      Int
+  electricityPriceCtKwh   Float
+  feedInTariffCtKwh       Float
+  selfConsumptionShare    Float
+  systemCostPerKwpEurLow  Float
+  systemCostPerKwpEurHigh Float
+
+  // Outputs — all ranges, all "unverbindliche Schätzung"
+  annualProductionKwhLow  Float
+  annualProductionKwhHigh Float
+  annualSavingsEurLow     Float
+  annualSavingsEurHigh    Float
+  paybackYearsLow         Float
+  paybackYearsHigh        Float
+}
+
+// ---------------------------------------------------------------------------
+// Lead capture (personal data starts here — GDPR applies)
+// ---------------------------------------------------------------------------
+
+model Lead {
+  id              String        @id @default(cuid())
+  createdAt       DateTime      @default(now())
+  propertyCheckId String        @unique
+  propertyCheck   PropertyCheck @relation(fields: [propertyCheckId], references: [id])
+
+  name  String
+  email String
+  phone String?
+
+  // NEW | DOUBLE_OPT_IN_PENDING | CONFIRMED | QUALIFIED | ASSIGNED | REJECTED | DELETED
+  status String @default("DOUBLE_OPT_IN_PENDING")
+
+  isOwner            Boolean?
+  plannedTimeframe   String? // e.g. "0-3m", "3-12m", "researching"
+  qualificationNotes String?
+
+  doubleOptInToken       String?   @unique
+  doubleOptInConfirmedAt DateTime?
+
+  consents    ConsentLog[]
+  assignments LeadAssignment[]
+}
+
+model ConsentLog {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  leadId    String
+  lead      Lead     @relation(fields: [leadId], references: [id])
+
+  // CONTACT | LEAD_SHARING | EMAIL_MARKETING
+  consentType String
+  granted     Boolean
+  consentText String // exact wording shown to the user at the time
+  ipAddress   String?
+  userAgent   String?
+}
+
+// ---------------------------------------------------------------------------
+// Installer partners & lead handoff (the revenue side)
+// ---------------------------------------------------------------------------
+
+model InstallerPartner {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  companyName  String
+  contactName  String
+  email        String
+  phone        String?
+  // Comma-separated postcode prefixes they serve, e.g. "50,51,53"
+  regionPrefixes String
+  active         Boolean @default(true)
+  // Signed AVV (Auftragsverarbeitungsvertrag) on file — required before handoff
+  avvSignedAt DateTime?
+
+  pricePerLeadEur Float @default(75)
+
+  assignments LeadAssignment[]
+}
+
+model LeadAssignment {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  leadId      String
+  lead        Lead             @relation(fields: [leadId], references: [id])
+  installerId String
+  installer   InstallerPartner @relation(fields: [installerId], references: [id])
+
+  priceEur Float
+  // OFFERED | ACCEPTED | REJECTED | INVOICED | PAID
+  status String @default("OFFERED")
+
+  // Outcome feedback loop from the installer
+  // UNKNOWN | CONTACTED | QUOTED | SOLD | LOST
+  outcome      String  @default("UNKNOWN")
+  outcomeNotes String?
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  actor     String // "system" | "admin:<name>"
+  action    String // e.g. "lead.created", "lead.assigned", "lead.deleted"
+  entity    String
+  entityId  String
+  detail    String?
+}
